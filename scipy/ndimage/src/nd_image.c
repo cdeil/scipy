@@ -101,7 +101,7 @@ static npy_intp
 NI_ObjectToLongSequenceAndLength(PyObject *object, npy_intp **sequence)
 {
     npy_intp *pa, ii;
-    PyArrayObject *array = NA_InputArray(object, PyArray_INTP, NPY_CARRAY);
+    PyArrayObject *array = NA_InputArray(object, NPY_INTP, NPY_CARRAY);
     npy_intp length = PyArray_SIZE(array);
 
     *sequence = (npy_intp*)malloc(length * sizeof(npy_intp));
@@ -306,8 +306,8 @@ static int Py_Filter1DFunc(double *iline, npy_intp ilen,
     double *po = NULL;
     NI_PythonCallbackData *cbdata = (NI_PythonCallbackData*)data;
 
-    py_ibuffer = NA_NewArray(iline, PyArray_DOUBLE, 1, &ilen);
-    py_obuffer = NA_NewArray(NULL, PyArray_DOUBLE, 1, &olen);
+    py_ibuffer = NA_NewArray(iline, NPY_DOUBLE, 1, &ilen);
+    py_obuffer = NA_NewArray(NULL, NPY_DOUBLE, 1, &olen);
     if (!py_ibuffer || !py_obuffer)
         goto exit;
     tmp = Py_BuildValue("(OO)", py_ibuffer, py_obuffer);
@@ -394,7 +394,7 @@ static int Py_FilterFunc(double *buffer, npy_intp filter_size,
     PyObject *rv = NULL, *args = NULL, *tmp = NULL;
     NI_PythonCallbackData *cbdata = (NI_PythonCallbackData*)data;
 
-    py_buffer = NA_NewArray(buffer, PyArray_DOUBLE, 1, &filter_size);
+    py_buffer = NA_NewArray(buffer, NPY_DOUBLE, 1, &filter_size);
     if (!py_buffer)
         goto exit;
     tmp = Py_BuildValue("(O)", py_buffer);
@@ -677,31 +677,6 @@ exit:
     Py_XDECREF(zoom);
     Py_XDECREF(output);
     return PyErr_Occurred() ? NULL : Py_BuildValue("");
-}
-
-static PyObject *Py_Label(PyObject *obj, PyObject *args)
-{
-    PyArrayObject *input = NULL, *output = NULL, *strct = NULL;
-    npy_intp max_label;
-
-    if (!PyArg_ParseTuple(args, "O&O&O&",
-                          NI_ObjectToInputArray, &input,
-                          NI_ObjectToInputArray, &strct,
-                          NI_ObjectToOutputArray, &output))
-        goto exit;
-
-    if (!NI_Label(input, strct, &max_label, output))
-        goto exit;
-
-exit:
-    Py_XDECREF(input);
-    Py_XDECREF(strct);
-    Py_XDECREF(output);
-#if PY_VERSION_HEX < 0x02050000
-    return PyErr_Occurred() ? NULL : Py_BuildValue("l", (long)max_label);
-#else
-    return PyErr_Occurred() ? NULL : Py_BuildValue("n", (npy_intp)max_label);
-#endif
 }
 
 static PyObject *Py_FindObjects(PyObject *obj, PyObject *args)
@@ -1005,8 +980,6 @@ static PyMethodDef methods[] = {
     {"geometric_transform",   (PyCFunction)Py_GeometricTransform,
         METH_VARARGS, NULL},
     {"zoom_shift",            (PyCFunction)Py_ZoomShift,
-     METH_VARARGS, NULL},
-    {"label",                 (PyCFunction)Py_Label,
      METH_VARARGS, NULL},
     {"find_objects",          (PyCFunction)Py_FindObjects,
      METH_VARARGS, NULL},

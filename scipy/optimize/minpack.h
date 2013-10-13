@@ -31,7 +31,7 @@ the result tuple when the full_output argument is non-zero.
 #include "Python.h"
 #if PY_VERSION_HEX >= 0x03000000
     #define PyString_FromString PyBytes_FromString
-    #define PyString_ConcatAndDel PyBytes_ConcatAndDel
+    #define PyString_Concat PyBytes_Concat
     #define PyString_AsString PyBytes_AsString
     #define PyInt_FromLong PyLong_FromLong
 #endif
@@ -89,13 +89,13 @@ the result tuple when the full_output argument is non-zero.
 
 #define SET_DIAG(ap_diag,o_diag,mode) { /* Set the diag vector from input */ \
   if (o_diag == NULL || o_diag == Py_None) { \
-    ap_diag = (PyArrayObject *)PyArray_SimpleNew(1,&n,PyArray_DOUBLE); \
+    ap_diag = (PyArrayObject *)PyArray_SimpleNew(1,&n,NPY_DOUBLE); \
     if (ap_diag == NULL) goto fail; \
     diag = (double *)ap_diag -> data; \
     mode = 1; \
   } \
   else { \
-    ap_diag = (PyArrayObject *)PyArray_ContiguousFromObject(o_diag, PyArray_DOUBLE, 1, 1); \
+    ap_diag = (PyArrayObject *)PyArray_ContiguousFromObject(o_diag, NPY_DOUBLE, 1, 1); \
     if (ap_diag == NULL) goto fail; \
     diag = (double *)ap_diag -> data; \
     mode = 2; } }
@@ -127,13 +127,13 @@ static PyObject *call_python_function(PyObject *func, npy_intp n, double *x, PyO
   */
 
   PyArrayObject *sequence = NULL;
-  PyObject *arglist = NULL, *tmpobj = NULL;
-  PyObject *arg1 = NULL, *str1 = NULL;
+  PyObject *arglist = NULL;
+  PyObject *arg1 = NULL;
   PyObject *result = NULL;
   PyArrayObject *result_array = NULL;
 
   /* Build sequence argument from inputs */
-  sequence = (PyArrayObject *)PyArray_SimpleNewFromData(1, &n, PyArray_DOUBLE, (char *)x);
+  sequence = (PyArrayObject *)PyArray_SimpleNewFromData(1, &n, NPY_DOUBLE, (char *)x);
   if (sequence == NULL) PYERR2(error_obj,"Internal failure to make an array of doubles out of first\n                 argument to function call.");
 
   /* Build argument list */
@@ -153,18 +153,10 @@ static PyObject *call_python_function(PyObject *func, npy_intp n, double *x, PyO
           arguments are in another passed variable.
    */
   if ((result = PyEval_CallObject(func, arglist))==NULL) {
-    PyErr_Print();
-    tmpobj = PyObject_GetAttrString(func, "func_name");
-    if (tmpobj == NULL) goto fail;
-    str1 = PyString_FromString("Error occurred while calling the Python function named ");
-    if (str1 == NULL) { Py_DECREF(tmpobj); goto fail;}
-    PyString_ConcatAndDel(&str1, tmpobj);
-    PyErr_SetString(error_obj, PyString_AsString(str1));
-    Py_DECREF(str1);
-    goto fail;
+      goto fail;
   }
 
-  if ((result_array = (PyArrayObject *)PyArray_ContiguousFromObject(result, PyArray_DOUBLE, dim-1, dim))==NULL) 
+  if ((result_array = (PyArrayObject *)PyArray_ContiguousFromObject(result, NPY_DOUBLE, dim-1, dim))==NULL) 
     PYERR2(error_obj,"Result from function call is not a proper array of floats.");
 
   Py_DECREF(result);
@@ -177,16 +169,3 @@ static PyObject *call_python_function(PyObject *func, npy_intp n, double *x, PyO
   Py_XDECREF(arg1);
   return NULL;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-

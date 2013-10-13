@@ -14,6 +14,7 @@ General-purpose
 .. autosummary::
    :toctree: generated/
 
+   minimize - Unified interface for minimizers of multivariate functions
    fmin - Nelder-Mead Simplex algorithm
    fmin_powell - Powell's (modified) level set method
    fmin_cg - Non-linear (Polak-Ribiere) conjugate gradient algorithm
@@ -40,6 +41,7 @@ Global
    :toctree: generated/
 
    anneal - Simulated annealing
+   basinhopping - Basinhopping stochastic optimizer
    brute - Brute force searching optimizer
 
 Scalar function minimizers
@@ -48,10 +50,22 @@ Scalar function minimizers
 .. autosummary::
    :toctree: generated/
 
+   minimize_scalar - Unified interface for minimizers of univariate functions
    fminbound - Bounded minimization of a scalar function
    brent - 1-D function minimization using Brent method
    golden - 1-D function minimization using Golden Section method
    bracket - Bracket a minimum, given two starting points
+
+Rosenbrock function
+-------------------
+
+.. autosummary::
+   :toctree: generated/
+
+   rosen - The Rosenbrock function.
+   rosen_der - The derivative of the Rosenbrock function.
+   rosen_hess - The Hessian matrix of the Rosenbrock function.
+   rosen_hess_prod - Product of the Rosenbrock Hessian with a vector.
 
 Fitting
 =======
@@ -66,7 +80,6 @@ Root finding
 
 Scalar functions
 ----------------
-
 .. autosummary::
    :toctree: generated/
 
@@ -91,6 +104,7 @@ General nonlinear solvers:
 .. autosummary::
    :toctree: generated/
 
+   root - Unified interface for nonlinear solvers of multivariate functions
    fsolve - Non-linear multi-variable equation solver
    broyden1 - Broyden's first method
    broyden2 - Broyden's second method
@@ -120,23 +134,31 @@ Utility Functions
 .. autosummary::
    :toctree: generated/
 
-   line_search - Return a step that satisfies the strong Wolfe conditions
+   approx_fprime - Approximate the gradient of a scalar function
    check_grad - Check the supplied derivative using finite differences
+   line_search - Return a step that satisfies the strong Wolfe conditions
+
+   show_options - Show specific options optimization solvers
 
 """
 
-from optimize import *
-from minpack import *
-from zeros import *
-from anneal import *
-from lbfgsb import fmin_l_bfgs_b
-from tnc import fmin_tnc
-from cobyla import fmin_cobyla
-from nonlin import *
-from slsqp import fmin_slsqp
-from nnls import nnls
+from __future__ import division, print_function, absolute_import
 
-__all__ = filter(lambda s:not s.startswith('_'),dir())
+from .optimize import *
+from ._minimize import *
+from ._root import *
+from .minpack import *
+from .zeros import *
+from .anneal import *
+from .lbfgsb import fmin_l_bfgs_b
+from .tnc import fmin_tnc
+from .cobyla import fmin_cobyla
+from .nonlin import *
+from .slsqp import fmin_slsqp
+from .nnls import nnls
+from ._basinhopping import basinhopping
+
+__all__ = [s for s in dir() if not s.startswith('_')]
 from numpy.testing import Tester
 test = Tester().test
 bench = Tester().bench

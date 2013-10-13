@@ -18,7 +18,6 @@ Simple N-D interpolation
 #
 
 import numpy as np
-cimport numpy as np
 
 import scipy.spatial.qhull as qhull
 cimport scipy.spatial.qhull as qhull
@@ -39,6 +38,10 @@ cdef extern from "numpy/ndarrayobject.h":
     cdef enum:
         NPY_MAXDIMS
 
+ctypedef fused double_or_complex:
+    double
+    double complex
+
 #------------------------------------------------------------------------------
 # Interpolator base class
 #------------------------------------------------------------------------------
@@ -51,18 +54,30 @@ class NDInterpolatorBase(object):
 
     """
 
-    def __init__(self, points, values, fill_value=np.nan, ndim=None):
+    def __init__(self, points, values, fill_value=np.nan, ndim=None,
+                 rescale=False):
         """
         Check shape of points and values arrays, and reshape values to
         (npoints, nvalues).  Ensure the `points` and values arrays are
         C-contiguous, and of correct type.
         """
+
+        if isinstance(points, qhull.Delaunay):
+            # Precomputed triangulation was passed in
+            if rescale:
+                raise ValueError("Rescaling is not supported when passing "
+                                 "a Delaunay triangulation as ``points``.")
+            self.tri = points
+            points = self.tri.points
+        else:
+            self.tri = None
+
         points = _ndim_coords_from_arrays(points)
-        values = np.ascontiguousarray(values)
+        values = np.asarray(values)
 
         self._check_init_shape(points, values, ndim=ndim)
 
-        points = np.ascontiguousarray(points.astype(np.double))
+        points = np.ascontiguousarray(points, dtype=np.double)
 
         self.values_shape = values.shape[1:]
         if values.ndim == 1:
@@ -76,13 +91,22 @@ class NDInterpolatorBase(object):
         # Complex or real?
         self.is_complex = np.issubdtype(self.values.dtype, np.complexfloating)
         if self.is_complex:
-            self.values = self.values.astype(np.complex)
+            self.values = np.ascontiguousarray(self.values, dtype=np.complex)
             self.fill_value = complex(fill_value)
         else:
-            self.values = self.values.astype(np.double)
+            self.values = np.ascontiguousarray(self.values, dtype=np.double)
             self.fill_value = float(fill_value)
 
-        self.points = points
+        if not rescale:
+            self.scale = None
+            self.points = points
+        else:
+            # scale to unit cube centered at 0
+            self.offset = np.mean(points, axis=0)
+            self.points = points - self.offset
+            self.scale = self.points.ptp(axis=0)
+            self.scale[~(self.scale > 0)] = 1.0  # avoid division by 0
+            self.points /= self.scale
 
     def _check_init_shape(self, points, values, ndim=None):
         """
@@ -119,16 +143,22 @@ class NDInterpolatorBase(object):
         """
         xi = _ndim_coords_from_arrays(args)
         xi = self._check_call_shape(xi)
-        xi = np.ascontiguousarray(xi.astype(np.double))
         shape = xi.shape
-        xi = xi.reshape(np.prod(shape[:-1]), shape[-1])
+        xi = xi.reshape(-1, shape[-1])
+        xi = np.ascontiguousarray(xi, dtype=np.double)
 
-        if self.is_complex:
-            r = self._evaluate_complex(xi)
+        if self.scale is None:
+            if self.is_complex:
+                r = self._evaluate_complex(xi)
+            else:
+                r = self._evaluate_double(xi)
         else:
-            r = self._evaluate_double(xi)
+            if self.is_complex:
+                r = self._evaluate_complex((xi - self.offset) / self.scale)
+            else:
+                r = self._evaluate_double((xi - self.offset) / self.scale)
 
-        return r.reshape(shape[:-1] + self.values_shape)
+        return np.asarray(r).reshape(shape[:-1] + self.values_shape)
 
 def _ndim_coords_from_arrays(points):
     """
@@ -158,7 +188,7 @@ def _ndim_coords_from_arrays(points):
 
 class LinearNDInterpolator(NDInterpolatorBase):
     """
-    LinearNDInterpolator(points, values)
+    LinearNDInterpolator(points, values, fill_value=np.nan, rescale=False)
 
     Piecewise linear interpolant in N dimensions.
 
@@ -166,53 +196,68 @@ class LinearNDInterpolator(NDInterpolatorBase):
 
     Parameters
     ----------
-    points : ndarray of floats, shape (npoints, ndims)
-        Data point coordinates.
+    points : ndarray of floats, shape (npoints, ndims); or Delaunay
+        Data point coordinates, or a precomputed Delaunay triangulation.
     values : ndarray of float or complex, shape (npoints, ...)
         Data values.
     fill_value : float, optional
         Value used to fill in for requested points outside of the
         convex hull of the input points.  If not provided, then
         the default is ``nan``.
+    rescale : boolean, optional
+        Rescale points to unit cube before performing interpolation.
+        This is useful if some of the input dimensions have
+        incommensurable units and differ by many orders of magnitude.
 
     Notes
     -----
     The interpolant is constructed by triangulating the input data
-    with Qhull [Qhull]_, and on each triangle performing linear
+    with Qhull [1]_, and on each triangle performing linear
     barycentric interpolation.
 
     References
     ----------
-    .. [Qhull] http://www.qhull.org/
+    .. [1] http://www.qhull.org/
 
     """
 
-    def __init__(self, points, values, fill_value=np.nan):
-        NDInterpolatorBase.__init__(self, points, values, fill_value=fill_value)
-        self.tri = qhull.Delaunay(self.points)
+    def __init__(self, points, values, fill_value=np.nan, rescale=False):
+        NDInterpolatorBase.__init__(self, points, values, fill_value=fill_value,
+                rescale=rescale)
+        if self.tri is None:
+            self.tri = qhull.Delaunay(self.points)
 
-% for DTYPE, CDTYPE in zip(["double", "complex"], ["double", "double complex"]):
+    def _evaluate_double(self, xi):
+        return self._do_evaluate(xi, 1.0)
+
+    def _evaluate_complex(self, xi):
+        return self._do_evaluate(xi, 1.0j)
+
     @cython.boundscheck(False)
-    def _evaluate_${DTYPE}(self, np.ndarray[np.double_t, ndim=2] xi):
-        cdef np.ndarray[np.${DTYPE}_t, ndim=2] values = self.values
-        cdef np.ndarray[np.${DTYPE}_t, ndim=2] out
-        cdef np.ndarray[np.double_t, ndim=2] points = self.points
-        cdef np.ndarray[np.npy_int, ndim=2] vertices = self.tri.vertices
+    @cython.wraparound(False)
+    def _do_evaluate(self, double[:,::1] xi, double_or_complex dummy):
+        cdef double_or_complex[:,::1] values = self.values
+        cdef double_or_complex[:,::1] out
+        cdef double[:,::1] points = self.points
+        cdef int[:,::1] simplices = self.tri.simplices
         cdef double c[NPY_MAXDIMS]
-        cdef ${CDTYPE} fill_value
+        cdef double_or_complex fill_value
         cdef int i, j, k, m, ndim, isimplex, inside, start, nvalues
         cdef qhull.DelaunayInfo_t info
+        cdef double eps, eps_broad
 
         ndim = xi.shape[1]
         start = 0
         fill_value = self.fill_value
 
-        qhull._get_delaunay_info(&info, self.tri, 1, 0)
+        qhull._get_delaunay_info(&info, self.tri, 1, 0, 0)
 
-        out = np.zeros((xi.shape[0], self.values.shape[1]), dtype=np.${DTYPE})
+        out = np.zeros((xi.shape[0], self.values.shape[1]),
+                       dtype=self.values.dtype)
         nvalues = out.shape[1]
 
         eps = np.finfo(np.double).eps * 100
+        eps_broad = sqrt(np.finfo(np.double).eps)
 
         with nogil:
             for i in xrange(xi.shape[0]):
@@ -220,42 +265,26 @@ class LinearNDInterpolator(NDInterpolatorBase):
                 # 1) Find the simplex
 
                 isimplex = qhull._find_simplex(&info, c,
-                                               (<double*>xi.data) + i*ndim,
-                                               &start, eps)
+                                               &xi[0,0] + i*ndim,
+                                               &start, eps, eps_broad)
 
                 # 2) Linear barycentric interpolation
 
                 if isimplex == -1:
                     # don't extrapolate
                     for k in xrange(nvalues):
-% if DTYPE == "double":
                         out[i,k] = fill_value
-% else:
-                        out[i,k].real = fill_value.real
-                        out[i,k].imag = fill_value.imag
-% endif
                     continue
 
                 for k in xrange(nvalues):
-% if DTYPE == "double":
                     out[i,k] = 0
-% else:
-                    out[i,k].real = 0
-                    out[i,k].imag = 0
-% endif
 
                 for j in xrange(ndim+1):
                     for k in xrange(nvalues):
-                        m = vertices[isimplex,j]
-% if DTYPE == "double":
-                        out[i,k] += c[j] * values[m,k]
-% else:
-                        out[i,k].real += c[j] * values[m, k].real
-                        out[i,k].imag += c[j] * values[m, k].imag
-% endif
+                        m = simplices[isimplex,j]
+                        out[i,k] = out[i,k] + c[j] * values[m,k]
 
         return out
-% endfor
 
 
 #------------------------------------------------------------------------------
@@ -309,8 +338,7 @@ cdef int _estimate_gradients_2d_global(qhull.DelaunayInfo_t *d, double *data,
     """
     cdef double Q[2*2]
     cdef double s[2], r[2]
-    cdef int ipoint, iiter, k
-    cdef qhull.RidgeIter2D_t it
+    cdef int ipoint, iiter, k, ipoint2, jpoint2
     cdef double f1, f2, df2, ex, ey, L, L3, det, err, change
 
     # initialize
@@ -389,21 +417,22 @@ cdef int _estimate_gradients_2d_global(qhull.DelaunayInfo_t *d, double *data,
                 s[k] = 0
 
             # walk over neighbours of given point
-            qhull._RidgeIter2D_init(&it, d, ipoint)
+            for jpoint2 in xrange(d.vertex_neighbors_indices[ipoint],
+                                  d.vertex_neighbors_indices[ipoint+1]):
+                ipoint2 = d.vertex_neighbors_indptr[jpoint2]
 
-            while it.index != -1:
                 # edge
-                ex = d.points[2*it.vertex2 + 0] - d.points[2*it.vertex + 0]
-                ey = d.points[2*it.vertex2 + 1] - d.points[2*it.vertex + 1]
+                ex = d.points[2*ipoint2 + 0] - d.points[2*ipoint + 0]
+                ey = d.points[2*ipoint2 + 1] - d.points[2*ipoint + 1]
                 L = sqrt(ex**2 + ey**2)
                 L3 = L*L*L
 
                 # data at vertices
-                f1 = data[it.vertex]
-                f2 = data[it.vertex2]
+                f1 = data[ipoint]
+                f2 = data[ipoint2]
 
                 # scaled gradient projections on the edge
-                df2 = -ex*y[it.vertex2*2 + 0] - ey*y[it.vertex2*2 + 1]
+                df2 = -ex*y[2*ipoint2 + 0] - ey*y[2*ipoint2 + 1]
 
                 # edge sum
                 Q[0] += 4*ex*ex / L3
@@ -413,9 +442,6 @@ cdef int _estimate_gradients_2d_global(qhull.DelaunayInfo_t *d, double *data,
                 s[0] += (6*(f1 - f2) - 2*df2) * ex / L3
                 s[1] += (6*(f1 - f2) - 2*df2) * ey / L3
 
-                # next edge
-                qhull._RidgeIter2D_next(&it)
-
             Q[2] = Q[1]
 
             # solve
@@ -424,11 +450,11 @@ cdef int _estimate_gradients_2d_global(qhull.DelaunayInfo_t *d, double *data,
             r[0] = ( Q[3]*s[0] - Q[1]*s[1])/det
             r[1] = (-Q[2]*s[0] + Q[0]*s[1])/det
 
-            change = max(fabs(y[it.vertex*2 + 0] + r[0]),
-                         fabs(y[it.vertex*2 + 1] + r[1]))
+            change = max(fabs(y[2*ipoint + 0] + r[0]),
+                         fabs(y[2*ipoint + 1] + r[1]))
 
-            y[it.vertex*2 + 0] = -r[0]
-            y[it.vertex*2 + 1] = -r[1]
+            y[2*ipoint + 0] = -r[0]
+            y[2*ipoint + 1] = -r[1]
 
             # relative/absolute error
             change /= max(1.0, max(fabs(r[0]), fabs(r[1])))
@@ -440,9 +466,11 @@ cdef int _estimate_gradients_2d_global(qhull.DelaunayInfo_t *d, double *data,
     # Didn't converge before maxiter
     return 0
 
-def estimate_gradients_2d_global(tri, y, maxiter=400, tol=1e-6):
-    cdef np.ndarray[np.double_t, ndim=2] data
-    cdef np.ndarray[np.double_t, ndim=3] grad
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def estimate_gradients_2d_global(tri, y, int maxiter=400, double tol=1e-6):
+    cdef double[:,::1] data
+    cdef double[:,:,::1] grad
     cdef qhull.DelaunayInfo_t info
     cdef int k, ret, nvalues
 
@@ -465,23 +493,23 @@ def estimate_gradients_2d_global(tri, y, maxiter=400, tol=1e-6):
         y = y[:,None]
 
     y = y.reshape(tri.npoints, -1).T
-    y = np.ascontiguousarray(y).astype(np.double)
+    y = np.ascontiguousarray(y, dtype=np.double)
     yi = np.empty((y.shape[0], y.shape[1], 2))
 
     data = y
     grad = yi
 
-    qhull._get_delaunay_info(&info, tri, 0, 1)
+    qhull._get_delaunay_info(&info, tri, 0, 0, 1)
     nvalues = data.shape[0]
 
     for k in xrange(nvalues):
         with nogil:
             ret = _estimate_gradients_2d_global(
                 &info,
-                <double*>data.data + info.npoints*k,
+                &data[k,0],
                 maxiter,
                 tol,
-                <double*>grad.data + 2*info.npoints*k)
+                &grad[k,0,0])
 
         if ret == 0:
             warnings.warn("Gradient estimation did not converge, "
@@ -496,22 +524,20 @@ def estimate_gradients_2d_global(tri, y, maxiter=400, tol=1e-6):
 #------------------------------------------------------------------------------
 
 
-% for DTYPE, CDTYPE in zip(["double", "complex"], ["double", "double complex"]):
-
 @cython.cdivision(True)
-cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
-                                                 int isimplex,
-                                                 double *b,
-                                                 ${CDTYPE} *f,
-                                                 ${CDTYPE} *df) nogil:
+cdef double_or_complex _clough_tocher_2d_single(qhull.DelaunayInfo_t *d,
+                                                int isimplex,
+                                                double *b,
+                                                double_or_complex *f,
+                                                double_or_complex *df) nogil:
     """
     Evaluate Clough-Tocher interpolant on a 2D triangle.
 
     Parameters
     ----------
-    d
+    d :
         Delaunay info
-    isimplex
+    isimplex : int
         Triangle to evaluate on
     b : shape (3,)
         Barycentric coordinates of the point on the triangle
@@ -522,7 +548,7 @@ cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
 
     Returns
     -------
-    w
+    w :
         Value of the interpolant at the given point
 
     References
@@ -536,19 +562,19 @@ cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
        Computer Aided Geometric Design, 3, 83 (1986).
 
     """
-    cdef ${CDTYPE} \
+    cdef double_or_complex \
          c3000, c0300, c0030, c0003, \
          c2100, c2010, c2001, c0210, c0201, c0021, \
          c1200, c1020, c1002, c0120, c0102, c0012, \
          c1101, c1011, c0111
-    cdef ${CDTYPE} \
+    cdef double_or_complex \
          f1, f2, f3, df12, df13, df21, df23, df31, df32
     cdef double \
          g1, g2, g3
     cdef double \
          e12x, e12y, e23x, e23y, e31x, e31y, \
          e14x, e14y, e24x, e24y, e34x, e34y
-    cdef ${CDTYPE} w
+    cdef double_or_complex w
     cdef double minval
     cdef double b1, b2, b3, b4
     cdef int k, itri
@@ -557,20 +583,20 @@ cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
 
     # XXX: optimize + refactor this!
 
-    e12x = (+ d.points[0 + 2*d.vertices[3*isimplex + 1]]
-            - d.points[0 + 2*d.vertices[3*isimplex + 0]])
-    e12y = (+ d.points[1 + 2*d.vertices[3*isimplex + 1]]
-            - d.points[1 + 2*d.vertices[3*isimplex + 0]])
+    e12x = (+ d.points[0 + 2*d.simplices[3*isimplex + 1]]
+            - d.points[0 + 2*d.simplices[3*isimplex + 0]])
+    e12y = (+ d.points[1 + 2*d.simplices[3*isimplex + 1]]
+            - d.points[1 + 2*d.simplices[3*isimplex + 0]])
 
-    e23x = (+ d.points[0 + 2*d.vertices[3*isimplex + 2]]
-            - d.points[0 + 2*d.vertices[3*isimplex + 1]])
-    e23y = (+ d.points[1 + 2*d.vertices[3*isimplex + 2]]
-            - d.points[1 + 2*d.vertices[3*isimplex + 1]])
+    e23x = (+ d.points[0 + 2*d.simplices[3*isimplex + 2]]
+            - d.points[0 + 2*d.simplices[3*isimplex + 1]])
+    e23y = (+ d.points[1 + 2*d.simplices[3*isimplex + 2]]
+            - d.points[1 + 2*d.simplices[3*isimplex + 1]])
 
-    e31x = (+ d.points[0 + 2*d.vertices[3*isimplex + 0]]
-            - d.points[0 + 2*d.vertices[3*isimplex + 2]])
-    e31y = (+ d.points[1 + 2*d.vertices[3*isimplex + 0]]
-            - d.points[1 + 2*d.vertices[3*isimplex + 2]])
+    e31x = (+ d.points[0 + 2*d.simplices[3*isimplex + 0]]
+            - d.points[0 + 2*d.simplices[3*isimplex + 2]])
+    e31y = (+ d.points[1 + 2*d.simplices[3*isimplex + 0]]
+            - d.points[1 + 2*d.simplices[3*isimplex + 2]])
 
     e14x = (e12x - e31x)/3
     e14y = (e12y - e31y)/3
@@ -670,13 +696,13 @@ cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
 
         # Centroid of the neighbour, in our local barycentric coordinates
 
-        y[0] = (+ d.points[0 + 2*d.vertices[3*itri + 0]]
-                + d.points[0 + 2*d.vertices[3*itri + 1]]
-                + d.points[0 + 2*d.vertices[3*itri + 2]]) / 3
+        y[0] = (+ d.points[0 + 2*d.simplices[3*itri + 0]]
+                + d.points[0 + 2*d.simplices[3*itri + 1]]
+                + d.points[0 + 2*d.simplices[3*itri + 2]]) / 3
 
-        y[1] = (+ d.points[1 + 2*d.vertices[3*itri + 0]]
-                + d.points[1 + 2*d.vertices[3*itri + 1]]
-                + d.points[1 + 2*d.vertices[3*itri + 2]]) / 3
+        y[1] = (+ d.points[1 + 2*d.simplices[3*itri + 0]]
+                + d.points[1 + 2*d.simplices[3*itri + 1]]
+                + d.points[1 + 2*d.simplices[3*itri + 2]]) / 3
 
         qhull._barycentric_coordinates(2, d.transform + isimplex*2*3, y, c)
 
@@ -730,8 +756,6 @@ cdef ${CDTYPE} _clough_tocher_2d_single_${DTYPE}(qhull.DelaunayInfo_t *d,
 
     return w
 
-% endfor
-
 class CloughTocher2DInterpolator(NDInterpolatorBase):
     """
     CloughTocher2DInterpolator(points, values, tol=1e-6)
@@ -742,8 +766,8 @@ class CloughTocher2DInterpolator(NDInterpolatorBase):
 
     Parameters
     ----------
-    points : ndarray of floats, shape (npoints, ndims)
-        Data point coordinates.
+    points : ndarray of floats, shape (npoints, ndims); or Delaunay
+        Data point coordinates, or a precomputed Delaunay triangulation.
     values : ndarray of float or complex, shape (npoints, ...)
         Data values.
     fill_value : float, optional
@@ -754,11 +778,15 @@ class CloughTocher2DInterpolator(NDInterpolatorBase):
         Absolute/relative tolerance for gradient estimation.
     maxiter : int, optional
         Maximum number of iterations in gradient estimation.
+    rescale : boolean, optional
+        Rescale points to unit cube before performing interpolation.
+        This is useful if some of the input dimensions have
+        incommensurable units and differ by many orders of magnitude.
 
     Notes
     -----
     The interpolant is constructed by triangulating the input data
-    with Qhull [Qhull]_, and constructing a piecewise cubic
+    with Qhull [1]_, and constructing a piecewise cubic
     interpolating Bezier polynomial on each triangle, using a
     Clough-Tocher scheme [CT]_.  The interpolant is guaranteed to be
     continuously differentiable.
@@ -770,8 +798,7 @@ class CloughTocher2DInterpolator(NDInterpolatorBase):
 
     References
     ----------
-
-    .. [Qhull] http://www.qhull.org/
+    .. [1] http://www.qhull.org/
 
     .. [CT] See, for example,
        P. Alfeld,
@@ -793,86 +820,73 @@ class CloughTocher2DInterpolator(NDInterpolatorBase):
     """
 
     def __init__(self, points, values, fill_value=np.nan,
-                 tol=1e-6, maxiter=400):
+                 tol=1e-6, maxiter=400, rescale=False):
         NDInterpolatorBase.__init__(self, points, values, ndim=2,
-                                    fill_value=fill_value)
-        self.tri = qhull.Delaunay(self.points)
+                                    fill_value=fill_value, rescale=rescale)
+        if self.tri is None:
+            self.tri = qhull.Delaunay(self.points)
         self.grad = estimate_gradients_2d_global(self.tri, self.values,
                                                  tol=tol, maxiter=maxiter)
 
-% for DTYPE, CDTYPE in zip(["double", "complex"], ["double", "double complex"]):
+    def _evaluate_double(self, xi):
+        return self._do_evaluate(xi, 1.0)
+
+    def _evaluate_complex(self, xi):
+        return self._do_evaluate(xi, 1.0j)
 
     @cython.boundscheck(False)
-    def _evaluate_${DTYPE}(self, np.ndarray[np.double_t, ndim=2] xi):
-        cdef np.ndarray[np.${DTYPE}_t, ndim=2] values = self.values
-        cdef np.ndarray[np.${DTYPE}_t, ndim=3] grad = self.grad
-        cdef np.ndarray[np.${DTYPE}_t, ndim=2] out
-        cdef np.ndarray[np.double_t, ndim=2] points = self.points
-        cdef np.ndarray[np.npy_int, ndim=2] vertices = self.tri.vertices
+    @cython.wraparound(False)
+    def _do_evaluate(self, double[:,::1] xi, double_or_complex dummy):
+        cdef double_or_complex[:,::1] values = self.values
+        cdef double_or_complex[:,:,:] grad = self.grad
+        cdef double_or_complex[:,::1] out
+        cdef double[:,::1] points = self.points
+        cdef int[:,::1] simplices = self.tri.simplices
         cdef double c[NPY_MAXDIMS]
-        cdef ${CDTYPE} f[NPY_MAXDIMS+1]
-        cdef ${CDTYPE} df[2*NPY_MAXDIMS+2]
-        cdef ${CDTYPE} w
-        cdef ${CDTYPE} fill_value
+        cdef double_or_complex f[NPY_MAXDIMS+1]
+        cdef double_or_complex df[2*NPY_MAXDIMS+2]
+        cdef double_or_complex w
+        cdef double_or_complex fill_value
         cdef int i, j, k, m, ndim, isimplex, inside, start, nvalues
         cdef qhull.DelaunayInfo_t info
+        cdef double eps, eps_broad
 
         ndim = xi.shape[1]
         start = 0
         fill_value = self.fill_value
 
-        qhull._get_delaunay_info(&info, self.tri, 1, 1)
+        qhull._get_delaunay_info(&info, self.tri, 1, 1, 0)
 
-        out = np.zeros((xi.shape[0], self.values.shape[1]), dtype=np.${DTYPE})
+        out = np.zeros((xi.shape[0], self.values.shape[1]),
+                       dtype=self.values.dtype)
         nvalues = out.shape[1]
 
         eps = np.finfo(np.double).eps * 100
+        eps_broad = sqrt(eps)
 
         with nogil:
             for i in xrange(xi.shape[0]):
                 # 1) Find the simplex
 
                 isimplex = qhull._find_simplex(&info, c,
-                                               (<double*>xi.data) + i*ndim,
-                                               &start, eps)
+                                               &xi[i,0],
+                                               &start, eps, eps_broad)
 
                 # 2) Clough-Tocher interpolation
 
                 if isimplex == -1:
                     # outside triangulation
                     for k in xrange(nvalues):
-% if DTYPE == "double":
                         out[i,k] = fill_value
-% else:
-                        out[i,k].real = fill_value.real
-                        out[i,k].imag = fill_value.imag
-% endif
                     continue
 
                 for k in xrange(nvalues):
                     for j in xrange(ndim+1):
-% if DTYPE == "double":
-                        f[j] = values[vertices[isimplex,j],k]
-                        df[2*j] = grad[vertices[isimplex,j],k,0]
-                        df[2*j+1] = grad[vertices[isimplex,j],k,1]
-% else:
-                        f[j].real = values[vertices[isimplex,j],k].real
-                        f[j].imag = values[vertices[isimplex,j],k].imag
-                        df[2*j].real = grad[vertices[isimplex,j],k,0].real
-                        df[2*j].imag = grad[vertices[isimplex,j],k,0].imag
-                        df[2*j+1].real = grad[vertices[isimplex,j],k,1].real
-                        df[2*j+1].imag = grad[vertices[isimplex,j],k,1].imag
-% endif
+                        f[j] = values[simplices[isimplex,j],k]
+                        df[2*j] = grad[simplices[isimplex,j],k,0]
+                        df[2*j+1] = grad[simplices[isimplex,j],k,1]
 
-                    w = _clough_tocher_2d_single_${DTYPE}(&info, isimplex, c,
-                                                          f, df)
-% if DTYPE == "double":
+                    w = _clough_tocher_2d_single(&info, isimplex, c, f, df)
                     out[i,k] = w
-% else:
-                    out[i,k].real = w.real
-                    out[i,k].imag = w.imag
-% endif
 
         return out
-
-% endfor

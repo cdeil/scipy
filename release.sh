@@ -1,6 +1,8 @@
 #! /bin/sh
 # script to build tarballs, mac os x and windows installers on mac os x
 
+export PYTHONPATH=''
+
 # Check we're using the correct g++/c++ for the 64-bit 2.7 dmg.
 # We do this because for Python 2.6 we use a symlink on the PATH to select
 # /usr/bin/g++-4.0, while for Python 2.7 we need the default 4.2 version.
@@ -14,11 +16,7 @@ fi
 # bootstrap needed to ensure we build the docs from the right scipy version
 paver bootstrap
 source bootstrap/bin/activate
-python setupsconsegg.py install
-
-# we need to copy Sphinx extensions from the numpy source tree
-mkdir doc/sphinxext
-cp -R ../numpy/doc/sphinxext/ doc/sphinxext/
+python setupegg.py install
 
 # build docs
 paver pdf
@@ -40,9 +38,8 @@ paver dmg -p 2.7  # 32/64-bit version
 
 paver bdist_superpack -p 2.7
 paver bdist_superpack -p 2.6
-paver bdist_superpack -p 2.5
-paver bdist_superpack -p 3.1
 paver bdist_superpack -p 3.2
+paver bdist_superpack -p 3.3
 
 
 #--------------------------------------------
@@ -52,7 +49,6 @@ paver bdist_superpack -p 3.2
 #paver dmg -p 2.6
 #paver dmg -p 2.7  # 32-bit version
 #export CC=/usr/bin/gcc-4.0  # necessary on 10.6, not sure about 10.5
-#paver dmg -p 2.5
 
 
 paver write_release_and_log

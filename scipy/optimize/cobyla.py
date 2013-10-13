@@ -1,21 +1,28 @@
-"""Interface to Constrained Optimization By Linear Approximation
+"""
+Interface to Constrained Optimization By Linear Approximation
 
-Functions:
-fmin_coblya(func, x0, cons, args=(), consargs=None, rhobeg=1.0, rhoend=1e-4,
-            iprint=1, maxfun=1000)
-    Minimize a function using the Constrained Optimization BY Linear
-    Approximation (COBYLA) method
+Functions
+---------
+.. autosummary::
+   :toctree: generated/
+
+    fmin_cobyla
 
 """
 
-import _cobyla
-from numpy import copy
+from __future__ import division, print_function, absolute_import
+
+import numpy as np
+from scipy.lib.six import callable
+from scipy.optimize import _cobyla
+from .optimize import Result, _check_unknown_options
+
 
 __all__ = ['fmin_cobyla']
 
 
-def fmin_cobyla(func, x0, cons, args=(), consargs=None, rhobeg=1.0, rhoend=1e-4,
-                iprint=1, maxfun=1000, disp=None):
+def fmin_cobyla(func, x0, cons, args=(), consargs=None, rhobeg=1.0,
+                rhoend=1e-4, iprint=1, maxfun=1000, disp=None, catol=1e-6):
     """
     Minimize a function using the Constrained Optimization BY Linear
     Approximation (COBYLA) method. This method wraps a FORTRAN
@@ -48,11 +55,18 @@ def fmin_cobyla(func, x0, cons, args=(), consargs=None, rhobeg=1.0, rhoend=1e-4,
         Over-rides the iprint interface.  Preferred.
     maxfun : int
         Maximum number of function evaluations.
+    catol : float
+        Absolute tolerance for constraint violations.
 
     Returns
     -------
     x : ndarray
         The argument that minimises `f`.
+
+    See also
+    --------
+    minimize: Interface to minimization algorithms for multivariate
+        functions. See the 'COBYLA' `method` in particular.
 
     Notes
     -----
@@ -126,10 +140,9 @@ def fmin_cobyla(func, x0, cons, args=(), consargs=None, rhobeg=1.0, rhoend=1e-4,
     err = "cons must be a sequence of callable functions or a single"\
           " callable function."
     try:
-        m = len(cons)
+        len(cons)
     except TypeError:
         if callable(cons):
-            m = 1
             cons = [cons]
         else:
             raise TypeError(err)
@@ -141,18 +154,128 @@ def fmin_cobyla(func, x0, cons, args=(), consargs=None, rhobeg=1.0, rhoend=1e-4,
     if consargs is None:
         consargs = args
 
+    # build constraints
+    con = tuple({'type': 'ineq', 'fun': c, 'args': consargs} for c in cons)
+
+    # options
     if disp is not None:
         iprint = disp
+    opts = {'rhobeg': rhobeg,
+            'tol': rhoend,
+            'iprint': iprint,
+            'disp': iprint != 0,
+            'maxiter': maxfun,
+            'catol': catol}
+
+    sol = _minimize_cobyla(func, x0, args, constraints=con,
+                           **opts)
+    if iprint > 0 and not sol['success']:
+        print("COBYLA failed to find a solution: %s" % (sol.message,))
+    return sol['x']
+
+
+def _minimize_cobyla(fun, x0, args=(), constraints=(),
+                     rhobeg=1.0, tol=1e-4, iprint=1, maxiter=1000,
+                     disp=False, catol=1e-6, **unknown_options):
+    """
+    Minimize a scalar function of one or more variables using the
+    Constrained Optimization BY Linear Approximation (COBYLA) algorithm.
+
+    Options for the COBYLA algorithm are:
+        rhobeg : float
+            Reasonable initial changes to the variables.
+        tol : float
+            Final accuracy in the optimization (not precisely guaranteed).
+            This is a lower bound on the size of the trust region.
+        disp : bool
+            Set to True to print convergence messages. If False,
+            `verbosity` is ignored as set to 0.
+        maxiter : int
+            Maximum number of function evaluations.
+        catol : float
+            Tolerance (absolute) for constraint violations
+
+    This function is called by the `minimize` function with
+    `method=COBYLA`. It is not supposed to be called directly.
+    """
+    _check_unknown_options(unknown_options)
+    maxfun = maxiter
+    rhoend = tol
+    if not disp:
+        iprint = 0
+
+    # check constraints
+    if isinstance(constraints, dict):
+        constraints = (constraints, )
+
+    for ic, con in enumerate(constraints):
+        # check type
+        try:
+            ctype = con['type'].lower()
+        except KeyError:
+            raise KeyError('Constraint %d has no type defined.' % ic)
+        except TypeError:
+            raise TypeError('Constraints must be defined using a '
+                            'dictionary.')
+        except AttributeError:
+            raise TypeError("Constraint's type must be a string.")
+        else:
+            if ctype != 'ineq':
+                raise ValueError("Constraints of type '%s' not handled by "
+                                 "COBYLA." % con['type'])
+
+        # check function
+        if 'fun' not in con:
+            raise KeyError('Constraint %d has no function defined.' % ic)
+
+        # check extra arguments
+        if 'args' not in con:
+            con['args'] = ()
+
+    m = len(constraints)
 
     def calcfc(x, con):
-        f = func(x, *args)
-        k = 0
-        for constraints in cons:
-            con[k] = constraints(x, *consargs)
-            k += 1
+        f = fun(x, *args)
+        for k, c in enumerate(constraints):
+            con[k] = c['fun'](x, *c['args'])
         return f
 
-    xopt = _cobyla.minimize(calcfc, m=m, x=copy(x0), rhobeg=rhobeg,
-                            rhoend=rhoend, iprint=iprint, maxfun=maxfun)
+    info = np.zeros(4, np.float64)
+    xopt, info = _cobyla.minimize(calcfc, m=m, x=np.copy(x0), rhobeg=rhobeg,
+                                  rhoend=rhoend, iprint=iprint, maxfun=maxfun,
+                                  dinfo=info)
 
-    return xopt
+    if info[3] > catol:
+        # Check constraint violation
+        info[0] = 4
+
+    return Result(x=xopt,
+                  status=int(info[0]),
+                  success=info[0] == 1,
+                  message={1: 'Optimization terminated successfully.',
+                           2: 'Maximum number of function evaluations has '
+                              'been exceeded.',
+                           3: 'Rounding errors are becoming damaging in '
+                              'COBYLA subroutine.',
+                           4: 'Did not converge to a solution satisfying '
+                              'the constraints. See `maxcv` for magnitude '
+                              'of violation.'
+                           }.get(info[0], 'Unknown exit status.'),
+                  nfev=int(info[1]),
+                  fun=info[2],
+                  maxcv=info[3])
+
+
+if __name__ == '__main__':
+
+    from math import sqrt
+
+    def fun(x):
+        return x[0] * x[1]
+
+    def cons(x):
+        return 1 - x[0]**2 - x[1]**2
+
+    x = fmin_cobyla(fun, [1., 1.], cons, iprint=3, disp=1)
+
+    print('\nTheoretical solution: %e, %e' % (1. / sqrt(2.), -1. / sqrt(2.)))
