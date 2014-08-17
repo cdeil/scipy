@@ -28,6 +28,7 @@ Reference
    cluster
    constants
    fftpack
+   diff
    integrate
    interpolate
    io

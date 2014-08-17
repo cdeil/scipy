@@ -10,6 +10,7 @@ SciPy Tutorial
    general
    basic
    special
+   diff
    integrate
    optimize
    interpolate

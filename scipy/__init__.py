@@ -16,9 +16,9 @@ Using any of these subpackages requires an explicit import.  For example,
 ``import scipy.cluster``.
 
 ::
-
  cluster                      --- Vector Quantization / Kmeans
  fftpack                      --- Discrete Fourier Transform algorithms
+ diff                         --- Differentiation routines
  integrate                    --- Integration routines
  interpolate                  --- Interpolation Tools
  io                           --- Data input and output
@@ -46,6 +46,7 @@ Using any of these subpackages requires an explicit import.  For example,
                                   [*]
  lib.lapack                   --- Wrappers to LAPACK library [*]
  integrate                    --- Integration routines [*]
+ diff                         --- Differentiation routines [*]
  ndimage                      --- n-dimensional image package [*]
  linalg                       --- Linear algebra routines [*]
  spatial                      --- Spatial data structures and algorithms
